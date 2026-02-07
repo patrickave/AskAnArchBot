@@ -70,6 +70,43 @@ This document captures the iterative process of tuning the bot's system prompt t
 
 ---
 
+### Iteration 4 — Multi-knowledge-file test (Storage + IAM)
+
+**Context**: Added `aws-iam-security.md` (3,683 lines) alongside existing `aws-storage-security.md` (567 lines). System prompt unchanged from iteration 3. Total knowledge base: ~4,250 lines injected into system prompt.
+
+**Test question**: "make a IAM recommendation for a conditional policy for a s3 bucket for a third party to access, i have their organizationID and IAM Role."
+
+This question spans both knowledge files (S3 from storage, IAM policies/cross-account from IAM) and tests whether the bot can synthesize correctly.
+
+**Result (first attempt, pre-IAM-expansion)**:
+- **672 tokens**, two JSON policy examples
+- **Agent review**: 65/100 — Fail
+  - Missing External ID (SEC03-BP05) — critical for third-party access, explicitly in knowledge file
+  - Speculative "Additional Recommendations" section
+  - MFA in bucket policy — wrong context (belongs in trust policies)
+  - Insufficient WAF citations
+
+**Result (second attempt, post-IAM-expansion to 3,683 lines)**:
+- **833 tokens** — actually *increased* despite same strict rules
+- **Agent review**: 45/100 — Fail (regression)
+  - **Still missing External ID** — despite it now appearing in 3 places in the IAM knowledge file (lines 269-296, 2332-2336, checklist at 3592)
+  - Generated two complete JSON policies that don't exist verbatim in knowledge files (violates strict rule #5)
+  - "Additional Recommendations" section fabricated from scattered concepts
+  - "Optional: Additional Conditions" section entirely synthesized
+  - Agent recommended response should be 150-250 tokens, not 833
+
+**Key observations from iteration 4**:
+
+1. **More knowledge = more synthesis, not more grounding.** Adding the expanded IAM file (3,683 lines) gave the model more raw material to synthesize from, which actually *increased* verbosity and reduced grounding. The model treats the larger knowledge base as license to combine concepts freely.
+
+2. **The bot consistently misses External ID for third-party scenarios.** Despite SEC03-BP05 appearing prominently in the knowledge file with explicit guidance ("Use External ID for confused deputy prevention"), the bot ignores it in both attempts. This suggests the model is pattern-matching on "S3 bucket policy" rather than recognizing the "third party" keyword should trigger External ID guidance.
+
+3. **JSON synthesis is the hardest behavior to constrain.** The strict rules successfully eliminated fabricated checklists and "common mistakes" sections, but the bot still synthesizes new JSON policies by combining components from across the knowledge files. The instruction "do not generate code examples unless they appear word-for-word" is not strong enough — the model interprets combining existing examples as acceptable.
+
+4. **Input token bloat.** With both knowledge files, the system prompt uses ~29,000-41,000 input tokens. This increases cost and latency without improving response quality.
+
+---
+
 ## Key Findings
 
 ### 1. Soft instructions don't constrain LLMs effectively
@@ -93,6 +130,15 @@ A single clear instruction with an exact refusal message worked from the first a
 
 ### 6. The model still paraphrases and editorializes
 Even at 85-90% grounding, the model drops qualifiers, strengthens language ("always", "never"), and omits WAF reference IDs that exist in the source. This suggests further iteration is needed.
+
+### 7. More knowledge doesn't mean better responses
+Adding a 3,683-line IAM knowledge file actually made responses worse (45/100 vs 65/100 pre-expansion). The model has more material to synthesize from, which increases verbosity and fabrication. There may be a sweet spot for knowledge file size.
+
+### 8. Keyword-triggered guidance may be needed
+The bot consistently misses External ID for "third party" scenarios despite it being prominent in the knowledge file. The model may need explicit trigger instructions (e.g., "If the user mentions third-party access, always reference External ID per SEC03-BP05").
+
+### 9. JSON synthesis is harder to constrain than text synthesis
+The strict rules eliminated fabricated text sections (checklists, common mistakes) but the bot still combines JSON components from across the knowledge files into new policies. This is a distinct behavior from text fabrication and may require a separate prohibition.
 
 ---
 
@@ -159,6 +205,20 @@ Using a domain-specific agent to review both the bot's responses AND the knowled
 | 1         | None            | 2,067         | ~50-60%     | Fail        |
 | 2         | Soft            | 1,213         | ~55-60%     | Fail        |
 | 3         | Strict          | 415           | ~85-90%     | B+          |
+| 4a        | Strict + IAM file (pre-expansion) | 672 | ~75-80% | Fail (65) |
+| 4b        | Strict + IAM file (post-expansion) | 833 | ~70-75% | Fail (45) |
+
+**Note**: Iteration 4 used the same system prompt as iteration 3 but with additional knowledge files loaded. The regression demonstrates that prompt constraints alone are insufficient — the knowledge file size and structure also affect response quality.
+
+---
+
+## Open Questions
+
+- Is there an optimal knowledge file size that balances coverage with grounding quality?
+- Should JSON policy examples be removed from knowledge files to prevent synthesis?
+- Would a retrieval-augmented approach (search relevant sections, inject only those) outperform full injection?
+- Can keyword triggers in the system prompt solve the External ID miss pattern?
+- Would reducing `max_tokens` to 500 force more concise, grounded responses?
 
 ---
 
