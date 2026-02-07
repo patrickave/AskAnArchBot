@@ -96,6 +96,49 @@ Even at 85-90% grounding, the model drops qualifiers, strengthens language ("alw
 
 ---
 
+## Using an Agent to Review Knowledge File Quality
+
+A key part of this process was using a separate Claude agent (`aws-security-architect`) to review and validate the bot's responses and knowledge files. This created a feedback loop:
+
+1. **Bot responds** to a user question using the knowledge file
+2. **Review agent evaluates** the response against the knowledge file, identifying what was grounded vs. fabricated
+3. **We adjust** the system prompt based on the agent's findings
+4. **Repeat** until the grounding % is acceptable
+
+### Why this works
+
+The review agent has its own strict WAF-only system prompt, so it's well-positioned to judge whether the bot's output is accurate and properly scoped. It can identify:
+- Content fabricated beyond the knowledge file (false grounding)
+- Missing WAF references that should have been cited
+- Qualifiers dropped or language strengthened beyond the source
+- Structural issues (fabricated checklists, "common mistakes" sections)
+
+### Agent-assisted knowledge file creation
+
+We also used the aws-security-architect agent to *write* the knowledge files themselves, then had it review its own output for completeness and accuracy. This two-pass approach caught gaps:
+
+- **First pass (creation)**: Agent writes a comprehensive knowledge file (e.g., `aws-storage-security.md`, `aws-iam-security.md`)
+- **Second pass (review)**: Agent evaluates the file against WAF coverage, comparing structure/depth to existing knowledge files
+- **Third pass (remediation)**: Agent fills in identified gaps (e.g., missing Cognito section, underdeveloped resource-based policies, missing shared responsibility model)
+
+### IAM knowledge file review results
+
+The agent reviewed `aws-iam-security.md` against the storage file as a baseline:
+
+| Criteria | Score | Notes |
+|----------|-------|-------|
+| Completeness | 85/100 | Missing Cognito, IAM Roles Anywhere, expanded resource-based policies |
+| Specificity | 95/100 | Excellent policy examples throughout |
+| Consistency | 75/100 | Missing cross-service patterns section, shared responsibility section |
+| WAF Alignment | 98/100 | Properly grounded in SEC01-SEC04, SEC09 |
+| Overall | 88/100 | High-priority gaps identified and queued for remediation |
+
+### Key takeaway
+
+Using a domain-specific agent to review both the bot's responses AND the knowledge files themselves creates a quality loop that's much more rigorous than manual review. The agent catches subtle issues (dropped qualifiers, over-prescriptive language, missing WAF references) that are easy to miss by eye.
+
+---
+
 ## Remaining Issues to Address
 
 - [ ] WAF reference IDs (SEC07-BP02, etc.) should be preserved in responses
