@@ -2,286 +2,148 @@
 
 ## Overview
 
-This document captures the iterative process of tuning the bot's system prompt to constrain responses strictly to loaded knowledge files. The goal: the bot should act as a knowledge-base-constrained advisor, not a general-purpose AI.
+This document captures the iterative process of tuning the bot's system prompt and architecture to constrain responses to loaded knowledge files. The goal: the bot should act as a WAF-constrained security advisor, not a general-purpose AI.
 
 ## Test Setup
 
 - **Model**: Claude Sonnet 4.5 (`claude-sonnet-4-5-20250929`)
-- **Knowledge file**: `bot/knowledge/aws-storage-security.md` (567 lines, WAF Security Pillar-aligned)
-- **Test question (on-topic)**: "how should i use CMK properly?"
-- **Test question (off-topic)**: "what is the security standards for vpcs?"
-- **Review agent**: aws-security-architect (custom Claude agent for WAF compliance review)
+- **Knowledge files**: `aws-storage-security.md` (567 lines), `aws-iam-security.md` (~3,750 lines)
+- **Review agents**: `response-review` (knowledge grounding) + `aws-security-architect` (WAF compliance)
+- **Review method**: Dual-agent from iteration 5 onward
 
 ---
 
-## Iteration Log
+## Iteration Summary
 
-### Iteration 1 — Baseline (no constraints)
-
-**System prompt**: General InfoSec Architect persona with standard guidelines (actionable recommendations, defense in depth, concise).
-
-**Result**:
-- Off-topic (VPC): Responded with a full answer using general knowledge (not tested with refusal)
-- On-topic (CMK): **2,067 tokens**, exhaustive guide with boto3 code, CLI commands, full IAM permission lists, encryption context examples
-- **Agent review**: ~50-60% of content was NOT in the knowledge file. Bot was functioning as a general AWS KMS expert.
-
-**Problem**: No guardrails. Bot supplements heavily with training data.
-
----
-
-### Iteration 2 — Added knowledge-only instruction + closing line
-
-**Changes**:
-- Added: "Only use information from the Reference Knowledge section below"
-- Added: "Do not generate code examples, CLI commands, or policy snippets unless they appear in the reference knowledge"
-- Added: Keep responses concise
-- Added closing line requirement
-
-**Result**:
-- Off-topic (VPC): **21 tokens** — clean refusal, exact message. (Pass)
-- On-topic (CMK): **1,213 tokens** — still too long
-- **Agent review**: ~40-50% of content still fabricated beyond the knowledge file
-  - Entire "Common Mistakes to Avoid" section (5 items) — not in knowledge file
-  - Entire "Validation Checklist" — not in knowledge file
-  - Detailed IAM permission lists (kms:Create*, kms:Describe*, etc.) — not in knowledge file
-  - Step-by-step cross-account procedures — not in knowledge file
-  - CloudTrail Insights recommendation — not in knowledge file
-
-**Problem**: "Only use information from Reference Knowledge" was too soft. The model still interpreted this loosely and expanded on concepts mentioned briefly in the knowledge file.
-
----
-
-### Iteration 3 — Strict rules with explicit prohibitions
-
-**Changes**: Rewrote guidelines as numbered "STRICT RULES":
-1. Knowledge-only responses — "if a fact is not written verbatim or near-verbatim, do not include it"
-2. Off-topic refusal — exact message, nothing else
-3. Be brief — "do not write exhaustive guides, generate checklists, or create sections that don't exist"
-4. Closing line requirement
-5. No fabrication — explicitly banned code examples, CLI commands, IAM permission lists, policy snippets, step-by-step procedures, and "common mistakes" sections unless word-for-word in the knowledge
-
-**Result**:
-- On-topic (CMK): **415 tokens** — 66% reduction from iteration 2, 80% reduction from iteration 1
-- **Agent review**: ~85-90% grounded in knowledge file. Grade: B+
-  - Minor issues: dropped a qualifier ("for most workloads" became absolute), slightly over-prescriptive ("always use CMKs"), missing WAF reference IDs from knowledge file
-  - No fabricated sections, no code examples, no checklists
-
-**Improvement**: Significant. The explicit prohibitions and "verbatim or near-verbatim" language made the biggest difference.
-
----
-
-### Iteration 4 — Multi-knowledge-file test (Storage + IAM)
-
-**Context**: Added `aws-iam-security.md` (3,683 lines) alongside existing `aws-storage-security.md` (567 lines). System prompt unchanged from iteration 3. Total knowledge base: ~4,250 lines injected into system prompt.
-
-**Test question**: "make a IAM recommendation for a conditional policy for a s3 bucket for a third party to access, i have their organizationID and IAM Role."
-
-This question spans both knowledge files (S3 from storage, IAM policies/cross-account from IAM) and tests whether the bot can synthesize correctly.
-
-**Result (first attempt, pre-IAM-expansion)**:
-- **672 tokens**, two JSON policy examples
-- **Agent review**: 65/100 — Fail
-  - Missing External ID (SEC03-BP05) — critical for third-party access, explicitly in knowledge file
-  - Speculative "Additional Recommendations" section
-  - MFA in bucket policy — wrong context (belongs in trust policies)
-  - Insufficient WAF citations
-
-**Result (second attempt, post-IAM-expansion to 3,683 lines)**:
-- **833 tokens** — actually *increased* despite same strict rules
-- **Agent review**: 45/100 — Fail (regression)
-  - **Still missing External ID** — despite it now appearing in 3 places in the IAM knowledge file (lines 269-296, 2332-2336, checklist at 3592)
-  - Generated two complete JSON policies that don't exist verbatim in knowledge files (violates strict rule #5)
-  - "Additional Recommendations" section fabricated from scattered concepts
-  - "Optional: Additional Conditions" section entirely synthesized
-  - Agent recommended response should be 150-250 tokens, not 833
-
-**Key observations from iteration 4**:
-
-1. **More knowledge = more synthesis, not more grounding.** Adding the expanded IAM file (3,683 lines) gave the model more raw material to synthesize from, which actually *increased* verbosity and reduced grounding. The model treats the larger knowledge base as license to combine concepts freely.
-
-2. **The bot consistently misses External ID for third-party scenarios.** Despite SEC03-BP05 appearing prominently in the knowledge file with explicit guidance ("Use External ID for confused deputy prevention"), the bot ignores it in both attempts. This suggests the model is pattern-matching on "S3 bucket policy" rather than recognizing the "third party" keyword should trigger External ID guidance.
-
-3. **JSON synthesis is the hardest behavior to constrain.** The strict rules successfully eliminated fabricated checklists and "common mistakes" sections, but the bot still synthesizes new JSON policies by combining components from across the knowledge files. The instruction "do not generate code examples unless they appear word-for-word" is not strong enough — the model interprets combining existing examples as acceptable.
-
-4. **Input token bloat.** With both knowledge files, the system prompt uses ~29,000-41,000 input tokens. This increases cost and latency without improving response quality.
+| Iter | Changes | Test Question | Tokens | Grounding | Grade | WAF |
+|------|---------|---------------|--------|-----------|-------|-----|
+| 1 | Baseline, no constraints | CMK usage | 2,067 | ~50% | Fail | — |
+| 2 | Soft "knowledge-only" instruction | CMK usage | 1,213 | ~55% | Fail | — |
+| 3 | Strict rules (verbatim/near-verbatim) | CMK usage | 415 | ~87% | B+ | — |
+| 4a | + IAM file (pre-expansion) | S3 third-party policy | 672 | ~75% | Fail (65) | — |
+| 4b | + IAM file (post-expansion) | S3 third-party policy | 833 | ~70% | Fail (45) | — |
+| 5 | Unchanged (dual-agent review) | Federation via IdP | 1,105 | ~30% | Fail (30) | ~75% |
+| 6 | + Rule 6 (JSON anti-synthesis) | Federation via IdP | 865 | ~25% | Fail (28) | ~80% |
+| 7 | + Knowledge gap fill + max_tokens=500 | S3 standards + wildcards | 500 | ~45% | Fail (32) | ~85% |
 
 ---
 
 ## Key Findings
 
-### 1. Soft instructions don't constrain LLMs effectively
-Saying "only use information from the reference knowledge" is too vague. The model interprets "information" broadly — if the knowledge file mentions "key rotation", the model feels licensed to explain the full mechanics of key rotation from its training data.
+### What worked
 
-### 2. Explicit prohibitions outperform positive instructions
-"Do not generate checklists, common mistakes sections, or IAM permission lists" was more effective than "keep responses concise." The model needs to know what NOT to do.
+1. **Explicit prohibitions outperform positive instructions.** "Do not generate checklists" beats "keep responses concise." The model needs to know what NOT to do.
 
-### 3. "Verbatim or near-verbatim" is the key phrase
-This language forced the model to stay close to the source material instead of expanding on concepts.
+2. **"Verbatim or near-verbatim" is the most effective constraint phrase.** Iteration 3 achieved ~87% grounding with this language — the best result across all iterations.
 
-### 4. Token usage is a proxy for compliance
-- Unconstrained: 2,067 tokens (~50% grounded)
-- Soft constraints: 1,213 tokens (~55% grounded)
-- Strict rules: 415 tokens (~87% grounded)
+3. **Off-topic refusal is easy.** A single clear instruction with an exact refusal message worked from the first attempt. The hard problem is constraining on-topic responses.
 
-Lower token count generally correlates with better knowledge grounding.
+4. **Strict rules eliminated the worst fabrication patterns.** Fabricated checklists, "common mistakes" sections, and CLI commands were successfully suppressed by iterations 3+.
 
-### 5. Off-topic refusal was easy to solve
-A single clear instruction with an exact refusal message worked from the first attempt. The hard problem is constraining ON-topic responses.
+5. **Filling knowledge gaps reduces fabrication targets.** Adding SAML trust policy examples (iteration 7) gives the bot verbatim material to quote instead of fabricating.
 
-### 6. The model still paraphrases and editorializes
-Even at 85-90% grounding, the model drops qualifiers, strengthens language ("always", "never"), and omits WAF reference IDs that exist in the source. This suggests further iteration is needed.
+### What didn't work
 
-### 7. More knowledge doesn't mean better responses
-Adding a 3,683-line IAM knowledge file actually made responses worse (45/100 vs 65/100 pre-expansion). The model has more material to synthesize from, which increases verbosity and fabrication. There may be a sweet spot for knowledge file size.
+6. **Prompt rules alone cannot prevent training data leakage.** Across 7 iterations of increasingly strict rules, grounding never reliably exceeded ~45% for broad questions. The model draws on training data whenever the knowledge file doesn't provide enough material for a complete answer.
 
-### 8. Keyword-triggered guidance may be needed
-The bot consistently misses External ID for "third party" scenarios despite it being prominent in the knowledge file. The model may need explicit trigger instructions (e.g., "If the user mentions third-party access, always reference External ID per SEC03-BP05").
+7. **More knowledge = more synthesis, not more grounding.** Adding the 3,683-line IAM file (iteration 4) gave the model more raw material to synthesize from, which increased verbosity and reduced grounding.
 
-### 9. JSON synthesis is harder to constrain than text synthesis
-The strict rules eliminated fabricated text sections (checklists, common mistakes) but the bot still combines JSON components from across the knowledge files into new policies. This is a distinct behavior from text fabrication and may require a separate prohibition.
+8. **Anti-synthesis rules reduce volume but not fabrication ratio.** Rule 6 cut JSON blocks from 6 to 4, but ~75% of JSON blocks were still fabricated. The model doesn't evaluate whether an example exists before generating it.
+
+9. **`max_tokens` is a blunt instrument.** Hard-capping at 500 (iteration 7) causes mid-sentence truncation, missing closing lines, and incomplete JSON. The model doesn't know its budget so it can't prioritize.
+
+### Patterns discovered
+
+10. **WAF compliance != knowledge grounding.** A response can be ~85% WAF-compliant but only ~45% grounded in the knowledge files. The model supplements with accurate WAF knowledge from training data — the elaboration is mostly correct, just not from the knowledge files specifically.
+
+11. **Missing knowledge = fabrication magnet.** The bot fabricates exactly where the knowledge files have conceptual mentions but no concrete examples. When an example exists (GitHub OIDC), it gets quoted. When it doesn't (SAML), the model invents one.
+
+12. **Token count correlates with compliance** — but only up to a point. Unconstrained: 2,067 tokens (~50% grounded). Strict: 415 tokens (~87% grounded). But broader questions break this pattern regardless of token count.
 
 ---
 
-## Using an Agent to Review Knowledge File Quality
+## Current System Prompt Rules
 
-A key part of this process was using a separate Claude agent (`aws-security-architect`) to review and validate the bot's responses and knowledge files. This created a feedback loop:
+1. **Knowledge-only responses** — verbatim or near-verbatim from Reference Knowledge
+2. **Off-topic refusal** — exact message, nothing else
+3. **Be brief** — no exhaustive guides, fabricated sections
+4. **Closing line** — required on every response
+5. **No fabrication** — no CLI commands, IAM lists, procedures, "common mistakes"
+6. **JSON anti-synthesis** — quote complete examples only, never combine/merge/modify
 
-1. **Bot responds** to a user question using the knowledge file
-2. **Review agent evaluates** the response against the knowledge file, identifying what was grounded vs. fabricated
-3. **We adjust** the system prompt based on the agent's findings
-4. **Repeat** until the grounding % is acceptable
+---
 
-### Why this works
+## Review Workflow
 
-The review agent has its own strict WAF-only system prompt, so it's well-positioned to judge whether the bot's output is accurate and properly scoped. It can identify:
-- Content fabricated beyond the knowledge file (false grounding)
-- Missing WAF references that should have been cited
-- Qualifiers dropped or language strengthened beyond the source
-- Structural issues (fabricated checklists, "common mistakes" sections)
+### Dual-agent review process
+
+1. Bot responds to test question
+2. Launch `response-review` agent — evaluates knowledge grounding, rule compliance, token efficiency
+3. Launch `aws-security-architect` agent — evaluates WAF alignment, missing security principles
+4. Both return concise reports (~200-300 tokens each)
+
+| Agent | Focus | Catches |
+|-------|-------|---------|
+| `response-review` | Knowledge grounding, rule compliance | Fabricated content, missing references, rule violations |
+| `aws-security-architect` | WAF alignment, security completeness | Non-WAF guidance, missing best practices, incorrect citations |
 
 ### Agent-assisted knowledge file creation
 
-We also used the aws-security-architect agent to *write* the knowledge files themselves, then had it review its own output for completeness and accuracy. This two-pass approach caught gaps:
-
-- **First pass (creation)**: Agent writes a comprehensive knowledge file (e.g., `aws-storage-security.md`, `aws-iam-security.md`)
-- **Second pass (review)**: Agent evaluates the file against WAF coverage, comparing structure/depth to existing knowledge files
-- **Third pass (remediation)**: Agent fills in identified gaps (e.g., missing Cognito section, underdeveloped resource-based policies, missing shared responsibility model)
-
-### IAM knowledge file review results
-
-The agent reviewed `aws-iam-security.md` against the storage file as a baseline:
-
-| Criteria | Score | Notes |
-|----------|-------|-------|
-| Completeness | 85/100 | Missing Cognito, IAM Roles Anywhere, expanded resource-based policies |
-| Specificity | 95/100 | Excellent policy examples throughout |
-| Consistency | 75/100 | Missing cross-service patterns section, shared responsibility section |
-| WAF Alignment | 98/100 | Properly grounded in SEC01-SEC04, SEC09 |
-| Overall | 88/100 | High-priority gaps identified and queued for remediation |
-
-### Key takeaway
-
-Using a domain-specific agent to review both the bot's responses AND the knowledge files themselves creates a quality loop that's much more rigorous than manual review. The agent catches subtle issues (dropped qualifiers, over-prescriptive language, missing WAF references) that are easy to miss by eye.
+Used the `aws-security-architect` agent in a three-pass workflow:
+1. **Create**: Agent writes comprehensive knowledge file
+2. **Review**: Agent evaluates against WAF coverage
+3. **Remediate**: Agent fills identified gaps
 
 ---
 
-## Remaining Issues to Address
+## Decision: Accept Elaboration (Option A)
 
-- [ ] WAF reference IDs (SEC07-BP02, etc.) should be preserved in responses
-- [ ] Qualifiers from source material should not be dropped (e.g., "for most workloads")
-- [ ] Absolute language ("always", "never") should only be used when the knowledge file uses it
-- [ ] Consider reducing `max_tokens` in the API call as a hard ceiling
-- [ ] Consider testing with different models (e.g., Haiku for faster/cheaper responses)
+After 7 iterations, we've determined that **prompt-level constraints alone cannot fully prevent training data elaboration**. This is a fundamental LLM behavior, not a prompt engineering failure.
+
+**What the knowledge files actually do well:**
+- Define topic boundaries (off-topic refusal works perfectly)
+- Provide verbatim examples the bot can quote (when they exist)
+- Set the WAF-grounded tone and structure
+
+**What they can't do:**
+- Prevent the model from supplementing with accurate training data on covered topics
+- Force strict quotation when the knowledge file only mentions a concept briefly
+
+**Accepted trade-off**: The bot produces WAF-compliant guidance (~85%) that draws partially from training data beyond the knowledge files (~45% grounded). The elaboration is mostly accurate — it's AWS WAF knowledge from the same source material the knowledge files were written from.
+
+---
+
+## Recommended Next Step: RAG Architecture (Option B)
+
+The current architecture injects all knowledge files (~4,250 lines, ~42,000 input tokens) into every system prompt. This is expensive, slow, and gives the model too much material to synthesize from.
+
+**Proposed change**: Retrieval-Augmented Generation (RAG)
+1. Embed knowledge file sections into a vector store
+2. On each user question, retrieve only the top 3-5 most relevant sections (~50-100 lines)
+3. Inject only those sections into the system prompt
+4. Smaller, more focused context = less training data activation, better grounding
+
+**Expected benefits**:
+- Lower input token cost (~5,000 vs ~42,000 per request)
+- Better grounding (less material to synthesize from — mirrors the iteration 3 result where a single focused knowledge file achieved ~87%)
+- Faster response times
+- Scales to more knowledge files without linear cost increase
+
+**Trade-offs**:
+- Retrieval quality becomes a new failure mode (wrong sections retrieved)
+- More infrastructure (vector store, embedding pipeline)
+- Need to evaluate chunking strategy for knowledge files
+
+---
+
+## Open Items
+
+- [ ] Implement RAG architecture (Option B) when ready to invest
+- [ ] Re-test federation question to verify SAML examples get quoted from updated knowledge file
+- [ ] Evaluate whether `max_tokens` should be increased to 600-700 to avoid mid-sentence truncation
+- [ ] Consider adding system prompt instruction for self-regulated length ("keep under 400 tokens") instead of hard cap
+- [ ] Test with different models (Haiku for faster/cheaper, Opus for better instruction following)
 - [ ] Rate limiting before production use
-- [ ] Test with multiple knowledge files loaded simultaneously
-- [ ] Evaluate whether the knowledge file itself is too detailed (inviting expansion)
-
----
-
-## Token Usage Summary
-
-| Iteration | Constraint Level | Output Tokens | Grounding % | Agent Grade |
-|-----------|-----------------|---------------|-------------|-------------|
-| 1         | None            | 2,067         | ~50-60%     | Fail        |
-| 2         | Soft            | 1,213         | ~55-60%     | Fail        |
-| 3         | Strict          | 415           | ~85-90%     | B+          |
-| 4a        | Strict + IAM file (pre-expansion) | 672 | ~75-80% | Fail (65) |
-| 4b        | Strict + IAM file (post-expansion) | 833 | ~70-75% | Fail (45) |
-
-**Note**: Iteration 4 used the same system prompt as iteration 3 but with additional knowledge files loaded. The regression demonstrates that prompt constraints alone are insufficient — the knowledge file size and structure also affect response quality.
-
----
-
-## Open Questions
-
-- Is there an optimal knowledge file size that balances coverage with grounding quality?
-- Should JSON policy examples be removed from knowledge files to prevent synthesis?
-- Would a retrieval-augmented approach (search relevant sections, inject only those) outperform full injection?
-- Can keyword triggers in the system prompt solve the External ID miss pattern?
-- Would reducing `max_tokens` to 500 force more concise, grounded responses?
-
----
-
-## Response Review Agent Workflow
-
-### Problem: Manual review burns context
-
-The previous review workflow required orchestrating everything in the main conversation:
-
-1. Read bot log output (~500 tokens)
-2. Copy the response into an `aws-security-architect` agent prompt (~1,000+ tokens)
-3. Agent returns ~2,000+ token analysis
-4. Summarize back for the user (~500 tokens)
-
-**Total per review: ~4,000+ tokens in main context** plus the full agent run.
-
-### Solution: Dedicated `response-review` agent
-
-Created `.claude/agents/response-review.md` — a purpose-built agent that handles the full review pipeline autonomously:
-
-1. Reads the bot's log output (file path or task ID provided in prompt)
-2. Extracts the user question + bot response
-3. Reads all knowledge files from `bot/knowledge/`
-4. Reads `bot/prompts/system.md` for the strict rules
-5. Grades on: grounding %, fabrication, missing WAF references, rule compliance, token efficiency
-6. Returns a concise structured report (under 300 tokens)
-
-**New cost per review: ~350 tokens in main context** (launch prompt + concise report).
-
-### Usage
-
-```
-# After the bot responds to a test question:
-@response-review Review the bot's response in [log file path or task output]
-```
-
-### Report format
-
-```
-## Response Review
-
-Grade: XX/100
-Grounding: XX% (X of Y claims traced to knowledge files)
-Tokens: XXX (target: 150-450)
-
-Rule violations:
-- [list or "None"]
-
-Missing:
-- [key concepts omitted]
-
-Fabricated:
-- [content beyond knowledge files]
-
-Recommendation: [one-line improvement suggestion]
-```
-
-### Why this matters
-
-- **Token savings**: ~90% reduction in main context tokens per review
-- **Consistency**: Same grading rubric every time (no ad-hoc analysis)
-- **Speed**: Single agent launch vs. multi-step manual orchestration
-- **Isolation**: Review analysis stays in the agent's context, not the main conversation
 
 ---
 

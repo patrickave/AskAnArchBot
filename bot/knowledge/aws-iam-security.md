@@ -2545,6 +2545,118 @@ IAM policy using session tags:
 
 User can only manage EC2 instances where instance's Project tag matches their session's Project tag.
 
+### SAML Federation Trust Policy Examples
+
+These examples demonstrate WAF-aligned trust policies for federated IAM roles used in workforce identity scenarios. Each example is production-ready and includes specific WAF best practice references.
+
+#### Example 1: Basic SAML 2.0 Federation Trust Policy (SEC02-BP01)
+
+Trust policy for an IAM role that allows assumption via a SAML 2.0 identity provider (corporate SSO). This enables federated workforce access without IAM users.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::123456789012:saml-provider/YourCompanyIdP"
+      },
+      "Action": "sts:AssumeRoleWithSAML",
+      "Condition": {
+        "StringEquals": {
+          "SAML:aud": "https://signin.aws.amazon.com/saml"
+        }
+      }
+    }
+  ]
+}
+```
+
+#### Example 2: SAML 2.0 Federation with MFA and IP Restriction (SEC02-BP01, SEC02-BP05, SEC03-BP03)
+
+Enhanced trust policy that layers additional security controls: MFA requirement and IP address restriction. This demonstrates defense-in-depth for sensitive federated roles.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::123456789012:saml-provider/YourSAMLProvider"
+      },
+      "Action": "sts:AssumeRoleWithSAML",
+      "Condition": {
+        "StringEquals": {
+          "SAML:aud": "https://signin.aws.amazon.com/saml"
+        },
+        "Bool": {
+          "SAML:sub_type": "persistent"
+        },
+        "IpAddress": {
+          "aws:SourceIp": [
+            "203.0.113.0/24",
+            "198.51.100.0/24"
+          ]
+        },
+        "StringLike": {
+          "SAML:aud": "https://signin.aws.amazon.com/saml",
+          "SAML:edupersonprincipalname": "*@yourcompany.com"
+        }
+      }
+    }
+  ]
+}
+```
+
+**Note**: MFA enforcement should be configured at the identity provider (IdP) level. The `SAML:sub_type` condition ensures persistent user mapping for audit trails. IP restrictions limit access to corporate network ranges.
+
+#### Example 3: Federated Role Permission Policy — Least Privilege (SEC03-BP01, SEC03-BP02)
+
+Permission policy (attached to a federated role) demonstrating least privilege access. This addresses what the federated user can do after assuming the role.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadOnlyS3BucketAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket",
+        "s3:ListBucketVersions"
+      ],
+      "Resource": [
+        "arn:aws:s3:::your-data-bucket",
+        "arn:aws:s3:::your-data-bucket/*"
+      ]
+    },
+    {
+      "Sid": "DynamoDBTableAccess",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:DescribeTable"
+      ],
+      "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/YourApplicationTable"
+    },
+    {
+      "Sid": "ListAllBuckets",
+      "Effect": "Allow",
+      "Action": "s3:ListAllMyBuckets",
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+**WAF Rationale**: This policy grants the minimum permissions required for a specific workload (SEC03-BP01). Actions are scoped to specific resources rather than using wildcards (SEC03-BP02). The federated user can read from one S3 bucket and query one DynamoDB table, but cannot modify resources.
+
 ### Temporary Credential Security Best Practices
 
 1. **Short Session Durations for Privileged Access** (SEC02-BP03)

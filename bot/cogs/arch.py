@@ -65,7 +65,7 @@ class Arch(commands.Cog):
             extra={
                 "gen_ai.system": "anthropic",
                 "gen_ai.request.model": "claude-sonnet-4-5-20250929",
-                "gen_ai.request.max_tokens": 4096,
+                "gen_ai.request.max_tokens": 500,
                 "gen_ai.user.id": user_id,
                 "gen_ai.user.name": str(ctx.author),
                 "gen_ai.prompt.system": self.system_prompt[:200] + "...",
@@ -77,7 +77,7 @@ class Arch(commands.Cog):
         async with ctx.typing():
             response = await self.client.messages.create(
                 model="claude-sonnet-4-5-20250929",
-                max_tokens=4096,
+                max_tokens=500,
                 system=self.system_prompt,
                 messages=self.conversations[user_id],
             )
