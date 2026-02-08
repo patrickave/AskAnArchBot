@@ -222,4 +222,67 @@ Using a domain-specific agent to review both the bot's responses AND the knowled
 
 ---
 
+## Response Review Agent Workflow
+
+### Problem: Manual review burns context
+
+The previous review workflow required orchestrating everything in the main conversation:
+
+1. Read bot log output (~500 tokens)
+2. Copy the response into an `aws-security-architect` agent prompt (~1,000+ tokens)
+3. Agent returns ~2,000+ token analysis
+4. Summarize back for the user (~500 tokens)
+
+**Total per review: ~4,000+ tokens in main context** plus the full agent run.
+
+### Solution: Dedicated `response-review` agent
+
+Created `.claude/agents/response-review.md` — a purpose-built agent that handles the full review pipeline autonomously:
+
+1. Reads the bot's log output (file path or task ID provided in prompt)
+2. Extracts the user question + bot response
+3. Reads all knowledge files from `bot/knowledge/`
+4. Reads `bot/prompts/system.md` for the strict rules
+5. Grades on: grounding %, fabrication, missing WAF references, rule compliance, token efficiency
+6. Returns a concise structured report (under 300 tokens)
+
+**New cost per review: ~350 tokens in main context** (launch prompt + concise report).
+
+### Usage
+
+```
+# After the bot responds to a test question:
+@response-review Review the bot's response in [log file path or task output]
+```
+
+### Report format
+
+```
+## Response Review
+
+Grade: XX/100
+Grounding: XX% (X of Y claims traced to knowledge files)
+Tokens: XXX (target: 150-450)
+
+Rule violations:
+- [list or "None"]
+
+Missing:
+- [key concepts omitted]
+
+Fabricated:
+- [content beyond knowledge files]
+
+Recommendation: [one-line improvement suggestion]
+```
+
+### Why this matters
+
+- **Token savings**: ~90% reduction in main context tokens per review
+- **Consistency**: Same grading rubric every time (no ad-hoc analysis)
+- **Speed**: Single agent launch vs. multi-step manual orchestration
+- **Isolation**: Review analysis stays in the agent's context, not the main conversation
+
+---
+
 *Last updated: 2026-02-07*
