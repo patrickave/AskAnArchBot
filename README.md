@@ -18,16 +18,14 @@ This is an R&D testbed, not a production tool. We're iterating on prompt enginee
 
 ## What We've Learned So Far
 
-After 7 iterations of prompt tuning (documented in [`docs/observations-prompt-tuning.md`](docs/observations-prompt-tuning.md)), the key findings are:
+After 8 iterations of prompt tuning and architecture changes (documented in [`docs/observations-prompt-tuning.md`](docs/observations-prompt-tuning.md)), the key findings are:
 
 - **Off-topic refusal works perfectly.** The bot reliably refuses questions outside its knowledge scope. Topic boundaries are easy to enforce.
-- **On-topic grounding is the hard problem.** The bot consistently supplements knowledge file content with accurate-but-unsourced guidance from its training data. Across 7 iterations, grounding to the knowledge files ranged from ~25-87% depending on question breadth.
-- **The elaboration is mostly correct.** WAF compliance scores (~85%) are significantly higher than knowledge grounding scores (~45%). The model draws on the same AWS documentation its knowledge files were written from — so the "fabricated" content is usually accurate, just not from the specified source.
-- **Prompt rules hit diminishing returns.** Strict rules, explicit prohibitions, and anti-synthesis instructions improved grounding from ~50% to ~87% for narrow questions, but broad questions still activate training data regardless of constraints.
+- **On-topic grounding is the hard problem.** The bot consistently supplements knowledge file content with accurate-but-unsourced guidance from its training data. Across 7 iterations of prompt tuning, grounding ranged from ~25-87% depending on question breadth.
+- **RAG dramatically reduces cost but exposes retrieval quality as the new bottleneck.** Iteration 8 replaced full knowledge injection (~42k input tokens) with TF-IDF retrieval (~6k input tokens — 86% reduction). Cost per request dropped from ~$0.13 to ~$0.02. However, cross-domain questions (spanning IAM + S3) retrieve only IAM chunks, missing verbatim S3 policy examples — dropping grounding from ~75% to ~40%.
+- **Prompt rules hit diminishing returns.** Strict rules improved grounding from ~50% to ~87% for narrow questions, but broad questions still activate training data. RAG addresses cost architecturally but retrieval quality must improve before grounding can match the full-injection baseline.
 
-The core tension: **the bot is a better security advisor than it is a knowledge-file quoter.** Whether that's acceptable depends on the use case. For general Q&A, it's probably fine. For scoring a design against a specific framework, the grounding matters more.
-
-See the full iteration log and findings in [`docs/observations-prompt-tuning.md`](docs/observations-prompt-tuning.md).
+The core tension: **cost vs. retrieval quality.** Full knowledge injection is expensive but grounded (~75%). RAG is cheap but misses cross-domain content (~40%). The next lever is smarter retrieval, not more prompt engineering. See the full iteration log in [`docs/observations-prompt-tuning.md`](docs/observations-prompt-tuning.md).
 
 ## Architecture
 
@@ -38,12 +36,17 @@ Discord DM
 AskAnArchBot (discord.py)
   |
   v
-Claude Sonnet 4.5 API
-  |-- System prompt: bot/prompts/system.md (strict rules)
-  |-- Knowledge files: bot/knowledge/*.md (WAF Security Pillar content)
+RAG Retrieval (TF-IDF, top-5 chunks)
+  |-- Chunks: bot/knowledge/*.md split at H2/H3 headers (~48 chunks)
+  |-- Index: scikit-learn TfidfVectorizer (in-memory, built at startup)
   |
   v
-Response (constrained to knowledge files)
+Claude Sonnet 4.5 API
+  |-- System prompt: bot/prompts/system.md (strict rules)
+  |-- Retrieved knowledge: top-5 relevant chunks (~2-6k tokens)
+  |
+  v
+Response (constrained to retrieved knowledge)
 ```
 
 **Review pipeline** (development only):
@@ -65,8 +68,12 @@ AskAnArchBot/
   bot/
     client.py                      # Discord bot client
     cogs/
-      arch.py                      # InfoSec Architect cog (Claude API)
+      arch.py                      # InfoSec Architect cog (Claude API + RAG)
       general.py                   # General commands
+    rag/
+      __init__.py                  # Package exports
+      chunker.py                   # Markdown chunking (H2/H3 splitting)
+      retriever.py                 # TF-IDF index and cosine similarity retrieval
     prompts/
       system.md                    # System prompt with strict rules
     knowledge/
@@ -93,6 +100,7 @@ DM the bot with `!arch <question>` to ask a security question. Use `!clear` to r
 
 ## Next Steps
 
-- **RAG architecture** — Replace full knowledge injection (~42k input tokens) with retrieval of relevant sections only. Expected to improve grounding and reduce cost.
+- **Fix cross-domain retrieval** — TF-IDF misses S3 storage chunks when questions also mention IAM. Options: keyword boosting for domain terms, hybrid retrieval, or upgrade to sentence-transformers embeddings.
+- **Increase max_tokens** — 500 is too low for security responses with JSON examples. Two truncations in iteration 8.
 - **Design review mode** — Accept architecture descriptions or diagrams and return a structured WAF security assessment with a score.
 - **More knowledge files** — Expand coverage beyond storage and IAM (networking, compute, detection, incident response).

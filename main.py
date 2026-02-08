@@ -19,7 +19,7 @@ class OTelJsonFormatter(logging.Formatter):
         }
         # Pull all gen_ai.* attributes from the extra dict
         for key, value in record.__dict__.items():
-            if key.startswith("gen_ai."):
+            if key.startswith(("gen_ai.", "rag.")):
                 entry[key] = value
         return json.dumps(entry, indent=2, default=str)
 
